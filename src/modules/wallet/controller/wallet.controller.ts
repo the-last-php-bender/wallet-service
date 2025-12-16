@@ -22,7 +22,7 @@ export class WalletController {
         @Param('id') id: string,
         @Body() fundWalletDto: FundWalletDto,
     ): Promise<Wallet> {
-        return this.walletService.fundWallet(id, fundWalletDto.amount);
+        return this.walletService.fundWallet(id, fundWalletDto);
     }
 
 
@@ -33,6 +33,7 @@ export class WalletController {
             transferWalletDto.senderId,
             transferWalletDto.receiverId,
             transferWalletDto.amount,
+            transferWalletDto.idempotencyKey
         );
     }
 

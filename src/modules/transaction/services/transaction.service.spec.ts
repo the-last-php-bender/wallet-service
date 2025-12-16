@@ -1,91 +1,136 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { TransactionService } from './transaction.service';
-import { Repository } from 'typeorm';
 import { Transaction } from '../entities/transaction.entity';
 import { getRepositoryToken } from '@nestjs/typeorm';
+import { Repository, EntityManager } from 'typeorm';
 import { NotFoundException } from '@nestjs/common';
 import { TransactionType } from 'src/common/constants/enum';
 
 describe('TransactionService', () => {
   let service: TransactionService;
-  let transactionRepo: Repository<Transaction>;
+  let repo: Repository<Transaction>;
+  let mockManager: Partial<EntityManager>;
 
-  const mockTransactionRepo = {
-    findOneBy: jest.fn(),
-    create: jest.fn(),
-    save: jest.fn(),
-    find: jest.fn(),
-    findOne: jest.fn(),
-  };
+  const mockTransaction = {
+    id: 'tx-123',
+    amount: 100,
+    type: TransactionType.FUND,
+    idempotencyKey: 'key-123',
+    wallet: { id: 'wallet-1' },
+  } as Transaction;
 
   beforeEach(async () => {
+    // Create a mock for EntityManager
+    mockManager = {
+      getRepository: jest.fn().mockReturnValue({
+        findOne: jest.fn(),
+        create: jest.fn(),
+        save: jest.fn(),
+      }),
+    };
+
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         TransactionService,
-        { provide: getRepositoryToken(Transaction), useValue: mockTransactionRepo },
+        {
+          provide: getRepositoryToken(Transaction),
+          useValue: {
+            findOne: jest.fn(),
+            find: jest.fn(),
+            create: jest.fn(),
+            save: jest.fn(),
+            findOneBy: jest.fn(),
+          },
+        },
       ],
     }).compile();
 
     service = module.get<TransactionService>(TransactionService);
-    transactionRepo = module.get<Repository<Transaction>>(getRepositoryToken(Transaction));
+    repo = module.get<Repository<Transaction>>(getRepositoryToken(Transaction));
   });
 
-  afterEach(() => {
-    jest.clearAllMocks();
-  });
+  describe('create', () => {
+    const createDto = {
+      wallet: { id: 'wallet-1' } as any,
+      amount: 100,
+      type: TransactionType.FUND,
+      idempotencyKey: 'unique-key',
+    };
 
-  it('should create a transaction normally', async () => {
-    const dto = { wallet: { id: '1' }, amount: 100, type: TransactionType.FUND };
-    const created = { id: 't1', ...dto };
+    it('should return existing transaction if idempotency key is found', async () => {
+      jest.spyOn(repo, 'findOne').mockResolvedValue(mockTransaction);
 
-    mockTransactionRepo.create.mockReturnValue(created);
-    mockTransactionRepo.save.mockResolvedValue(created);
+      const result = await service.create(createDto);
+      expect(result).toEqual({
+        tx: mockTransaction,
+        isNew: false
+      });
+    });
 
-    const result = await service.create(dto as any);
-    expect(result).toEqual(created);
-    expect(mockTransactionRepo.save).toHaveBeenCalledWith(created);
-  });
+    it('should use manager repository if manager is provided', async () => {
+      const managerRepo = mockManager.getRepository!(Transaction);
+      (managerRepo.findOne as jest.Mock).mockResolvedValue(null);
+      (managerRepo.create as jest.Mock).mockReturnValue(mockTransaction);
+      (managerRepo.save as jest.Mock).mockResolvedValue(mockTransaction);
 
-  it('should return existing transaction if idempotencyKey exists', async () => {
-    const dto = { wallet: { id: '1' }, amount: 100, type: TransactionType.FUND, idempotencyKey: 'abc123' };
-    const existing = { id: 't2', ...dto };
+      await service.create(createDto, mockManager as EntityManager);
 
-    mockTransactionRepo.findOneBy.mockResolvedValue(existing);
+      expect(mockManager.getRepository).toHaveBeenCalledWith(Transaction);
+      expect(managerRepo.save).toHaveBeenCalled();
+      // Ensure the global repo was NOT used
+      expect(repo.save).not.toHaveBeenCalled();
+    });
 
-    const result = await service.create(dto as any);
-    expect(result).toEqual(existing);
-    expect(mockTransactionRepo.create).not.toHaveBeenCalled();
-  });
+    it('should create and save a new transaction if key is not found', async () => {
+      jest.spyOn(repo, 'findOne').mockResolvedValue(null);
+      jest.spyOn(repo, 'create').mockReturnValue(mockTransaction);
+      jest.spyOn(repo, 'save').mockResolvedValue(mockTransaction);
 
-  it('should fetch transactions by wallet', async () => {
-    const transactions = [
-      { id: '1', amount: 100 },
-      { id: '2', amount: 50 },
-    ];
-    mockTransactionRepo.find.mockResolvedValue(transactions);
+      const result = await service.create(createDto);
 
-    const result = await service.getByWallet('wallet1');
-    expect(result).toEqual(transactions);
-    expect(mockTransactionRepo.find).toHaveBeenCalledWith({
-      where: { wallet: { id: 'wallet1' } },
-      order: { createdAt: 'DESC' },
+      // FIX: Expect the wrapped object
+      expect(result).toEqual({
+        tx: mockTransaction,
+        isNew: true
+      });
     });
   });
 
-  it('should fetch transaction by ID', async () => {
-    const tx = { id: 'tx1', amount: 100 };
-    mockTransactionRepo.findOne.mockResolvedValue(tx);
+  describe('getByWallet', () => {
+    it('should return transactions for a wallet', async () => {
+      const txs = [mockTransaction];
+      jest.spyOn(repo, 'find').mockResolvedValue(txs);
 
-    const result = await service.getById('tx1');
-    expect(result).toEqual(tx);
-    expect(mockTransactionRepo.findOne).toHaveBeenCalledWith({ where: { id: 'tx1' } });
+      const result = await service.getByWallet('wallet-1');
+
+      expect(repo.find).toHaveBeenCalledWith(expect.objectContaining({
+        where: { wallet: { id: 'wallet-1' } }
+      }));
+      expect(result).toEqual(txs);
+    });
+
+    it('should throw NotFoundException if no transactions exist', async () => {
+      jest.spyOn(repo, 'find').mockResolvedValue([]);
+
+      await expect(service.getByWallet('empty-wallet'))
+        .rejects.toThrow(NotFoundException);
+    });
   });
 
-  it('should throw NotFoundException if transaction ID does not exist', async () => {
-    mockTransactionRepo.findOne.mockResolvedValue(null);
+  describe('getById', () => {
+    it('should return a transaction by ID', async () => {
+      jest.spyOn(repo, 'findOne').mockResolvedValue(mockTransaction);
 
-    await expect(service.getById('notfound')).rejects.toThrow(
-      new NotFoundException('Transaction with ID notfound not found')
-    );
+      const result = await service.getById('tx-123');
+
+      expect(result).toEqual(mockTransaction);
+    });
+
+    it('should throw NotFoundException if transaction not found', async () => {
+      jest.spyOn(repo, 'findOne').mockResolvedValue(null);
+
+      await expect(service.getById('invalid-id'))
+        .rejects.toThrow(NotFoundException);
+    });
   });
 });

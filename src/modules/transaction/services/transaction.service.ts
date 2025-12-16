@@ -1,6 +1,6 @@
 import { Injectable, ConflictException, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { EntityManager, Repository } from 'typeorm';
 import { CreateTransactionDto } from '../dtos/transaction.dto';
 import { Transaction } from '../entities/transaction.entity';
 
@@ -9,27 +9,21 @@ export class TransactionService {
   constructor(
     @InjectRepository(Transaction)
     private readonly transactionRepo: Repository<Transaction>,
-  ) {}
+  ) { }
+async create(dto: CreateTransactionDto, manager?: EntityManager): Promise<{ tx: Transaction; isNew: boolean }> {
+  const repo = manager ? manager.getRepository(Transaction) : this.transactionRepo;
 
-  async create(dto: CreateTransactionDto): Promise<Transaction> {
-    if (dto.idempotencyKey) {
-      const existing = await this.transactionRepo.findOneBy({ idempotencyKey: dto.idempotencyKey });
-
-      if (existing) {
-        return existing; // return existing for idempotency
-      }
+  if (dto.idempotencyKey) {
+    const existing = await repo.findOne({ where: { idempotencyKey: dto.idempotencyKey } });
+    if (existing) {
+      return { tx: existing, isNew: false };
     }
-
-    const transaction = this.transactionRepo.create({
-      wallet: dto.wallet,
-      amount: dto.amount,
-      type: dto.type,
-      relatedWalletId: dto.relatedWalletId,
-      idempotencyKey: dto.idempotencyKey,
-    });
-
-    return this.transactionRepo.save(transaction);
   }
+
+  const transaction = repo.create(dto);
+  const saved = await repo.save(transaction);
+  return { tx: saved, isNew: true }; 
+}
 
   async getByWallet(walletId: string): Promise<Transaction[]> {
     const transactions = await this.transactionRepo.find({
